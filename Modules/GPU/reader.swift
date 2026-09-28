@@ -143,6 +143,19 @@ internal class InfoReader: Reader<GPUs> {
             let fanSpeed: Int? = stats["Fan Speed(%)"] as? Int ?? nil
             let coreClock: Int? = stats["Core Clock(MHz)"] as? Int ?? nil
             let memoryClock: Int? = stats["Memory Clock(MHz)"] as? Int ?? nil
+            // Discrete-GPU-only fields. Apple Silicon's
+            // PerformanceStatistics dictionary doesn't publish these; the
+            // macOS AMD driver (AMDRadeonX6000) does.
+            let usedVRAM: UInt64? = stats["inUseVidMemoryBytes"] as? UInt64
+            let powerDraw: Double? = stats["Total Power(W)"] as? Double
+
+            // Walk up the IORegistry to find the closest
+            // IOPCI2PCIBridge with an AAPL,slot-name data property
+            // and decode it to UTF-8. This is the same string the
+            // About This Mac → PCI Cards tab uses and the Mac Pro
+            // service manual labels on the chassis ("Slot-1",
+            // "Slot-3", …).
+            let slot: String? = Self.appleSlotName(forAccelerator: accelerator)
             
             if ioClass == "nvaccelerator" || ioClass.contains("nvidia") { // nvidia
                 predictModel = "Nvidia Graphics"
@@ -235,6 +248,15 @@ internal class InfoReader: Reader<GPUs> {
             }
             if let value = memoryClock {
                 self.gpus.list[idx].memoryClock = value
+            }
+            if let value = usedVRAM {
+                self.gpus.list[idx].usedVRAM = value
+            }
+            if let value = powerDraw {
+                self.gpus.list[idx].powerDraw = value
+            }
+            if let value = slot {
+                self.gpus.list[idx].slot = value
             }
         }
         
@@ -374,5 +396,69 @@ internal class InfoReader: Reader<GPUs> {
         let elapsed = now.timeIntervalSince(previousRead)
         guard elapsed > 0 else { return 0 }
         return (currentEnergy - self.previousANEEnergy) / elapsed
+    }
+
+    /// Walk up the IORegistry from an IOAccelerator (the GPU's userland
+    /// object) to the closest ancestor carrying an AAPL,slot-name
+    /// data property and decode it to UTF-8. Apple's IORegistry exposes
+    /// this on every IOPCI2PCIBridge in the Mac Pro chassis; the value
+    /// is the same string About This Mac → PCI Cards and the Mac Pro
+    /// service manual use ("Slot-1", "Slot-3", "Slot-8" on a 7,1).
+    /// Returns nil on Apple Silicon (no PCI), on Intel iGPUs (no
+    /// bridge), or when the data property is missing.
+    private static func appleSlotName(forAccelerator accelerator: NSDictionary) -> String? {
+        // Get the IOAccelerator's IORegistry entry from its IOClass key.
+        // We don't have a direct reference; instead we walk from the
+        // global IOPCIDevice table matching by IOPCIMatch against
+        // the accelerator's bus/device-id. Then walk up the parent
+        // chain to find AAPL,slot-name.
+        guard let accClass = accelerator["IOClass"] as? String else { return nil }
+        let accMatch = (accelerator["IOPCIMatch"] as? String ?? accelerator["IOPCIPrimaryMatch"] as? String ?? "").lowercased()
+        guard !accMatch.isEmpty,
+              let allPCI = fetchIOService("IOPCIDevice") else { return nil }
+        var target: NSDictionary? = nil
+        for dict in allPCI where (dict["IOClass"] as? String) == accClass {
+            if let m = (dict["IOPCIMatch"] as? String ?? dict["IOPCIPrimaryMatch"] as? String ?? "").lowercased() as String?,
+               m.contains(accMatch) || accMatch.contains(m) {
+                target = dict
+                break
+            }
+        }
+        guard let device = target else { return nil }
+
+        // The IOPCIDevice for a discrete AMD card is reached by walking
+        // up from the IOAccelerator's grandparent (the IOGraphicsAccelerator2
+        // sits between the accelerator and the PCI device). Use the
+        // entry's "parent" path via the IORegistry path.
+        guard let path = (device["acpi-path"] as? String) ?? (device["IOPCIPath"] as? String) else {
+            return nil
+        }
+        // Apple publishes the slot name as a sibling of the device
+        // on the same bridge. Walk all IOPCIBridge entries and find
+        // the one whose path is a prefix of ours.
+        guard let bridges = fetchIOService("IOPCI2PCIBridge") else { return nil }
+        for bridge in bridges {
+            guard let bridgePath = (bridge["acpi-path"] as? String) ?? (bridge["IOPCIPath"] as? String) else { continue }
+            if path.hasPrefix(bridgePath) || bridgePath.hasPrefix(path) {
+                if let slot = decodeSlotName(from: bridge) { return slot }
+            }
+        }
+        return nil
+    }
+
+    /// Decode the AAPL,slot-name data property (a CFData wrapping
+    /// UTF-8 padded to a 4-byte boundary) to a Swift String.
+    private static func decodeSlotName(from bridge: NSDictionary) -> String? {
+        guard let raw = bridge["AAPL,slot-name"] as? Data else { return nil }
+        // Strip trailing 0x00 and any high-bit padding bytes that
+        // Apple uses to round the UTF-8 string up to a 4-byte
+        // boundary.
+        var end = raw.count
+        while end > 0 {
+            let b = raw[end - 1]
+            if b == 0 || b > 0x7E { end -= 1 } else { break }
+        }
+        guard end > 0 else { return nil }
+        return String(data: raw.prefix(end), encoding: .utf8)
     }
 }

@@ -24,14 +24,14 @@ public enum GPU_types: GPU_type {
 public struct GPU_Info: Codable {
     public let id: String
     public let type: GPU_type
-    
+
     public let IOClass: String
     public var vendor: String? = nil
     public let model: String
     public var cores: Int? = nil
-    
+
     public var state: Bool = true
-    
+
     public var fanSpeed: Int? = nil
     public var coreClock: Int? = nil
     public var memoryClock: Int? = nil
@@ -41,7 +41,16 @@ public struct GPU_Info: Codable {
     public var tilerUtilization: Double? = nil
     public var aneUtilization: Double? = nil
     public var fps: Double? = nil
-    
+    // Discrete-GPU-only fields populated from the AMDPerformanceStatistics
+    // dictionary on macOS. nil on Apple Silicon (which doesn't publish
+    // them) and on Intel iGPUs. `usedVRAM` is in bytes; the popup formats
+    // it as MiB. `slot` is the chassis slot label from AAPL,slot-name
+    // on the closest IOPCI2PCIBridge (e.g. "Slot-1" on a Mac Pro 7,1),
+    // matching the About This Mac → PCI Cards tab.
+    public var usedVRAM: UInt64? = nil
+    public var powerDraw: Double? = nil
+    public var slot: String? = nil
+
     init(id: String, type: GPU_type, IOClass: String, vendor: String? = nil, model: String, cores: Int?, utilization: Double? = nil, render: Double? = nil, tiler: Double? = nil) {
         self.id = id
         self.type = type
@@ -53,7 +62,7 @@ public struct GPU_Info: Codable {
         self.renderUtilization = render
         self.tilerUtilization = tiler
     }
-    
+
     public func remote() -> String {
         var id = self.id
         if self.id.isEmpty {
@@ -225,7 +234,12 @@ public class GPU: Module {
         }
         
         if self.systemWidgetsUpdatesState {
+            // The widget (and the UnitedWidget) needs every active GPU, not
+            // just the selected one. Write the full list under a separate
+            // key so the existing single-GPU snapshot stays compatible with
+            // widgets that still decode a single GPU_Info.
             SystemWidgetUpdates.shared.update(selectedGPU, key: "GPU@InfoReader", kinds: [GPU_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
+            SystemWidgetUpdates.shared.update(value.list, key: "GPU@InfoReader.list", kinds: [GPU_entry.kind, "UnitedWidget"], defaults: self.userDefaults)
         }
     }
 }
