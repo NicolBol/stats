@@ -1158,6 +1158,70 @@ public class SMCHelper {
         return self.legacyIsInstalled ? .enabled : .notInstalled
     }
 
+    /// Self-contained summary of the helper state for "Copy diagnostic"
+    /// buttons in the UI. Includes everything a maintainer would need
+    /// to diagnose a "fan control stopped working" report: macOS
+    /// version, SMAppService status, helper binary location, launchd
+    /// plist, XPC connection state, and recent error log lines. Goes
+    /// to the clipboard and the unified log.
+    public func diagnostic() -> String {
+        var out = "# SMCHelper diagnostic\n"
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        out += "macOS: \(osVersion)\n"
+        out += "Helper plist: \(self.plistName)\n"
+        out += "Helper state: \(self.state)\n"
+
+        if #available(macOS 13, *) {
+            let svc = SMAppService.daemon(plistName: self.plistName)
+            out += "SMAppService.status: \(svc.status.rawValue)\n"
+        }
+
+        // Helper binary on disk
+        let helperURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/\(self.id)")
+        let appHelperURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LaunchServices/\(self.id)")
+        for url in [helperURL, appHelperURL] {
+            if FileManager.default.fileExists(atPath: url.path) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let size = attrs?[.size] as? Int ?? -1
+                let mod = attrs?[.modificationDate] as? Date
+                let modStr = mod.map { ISO8601DateFormatter().string(from: $0) } ?? "?"
+                out += "Helper binary: \(url.path) (size=\(size), mtime=\(modStr))\n"
+            } else {
+                out += "Helper binary: \(url.path) (NOT FOUND)\n"
+            }
+        }
+
+        // launchd plist on disk
+        let plistURL = URL(fileURLWithPath: "/Library/LaunchDaemons/\(self.plistName)")
+        if FileManager.default.fileExists(atPath: plistURL.path) {
+            out += "LaunchDaemon plist: \(plistURL.path) (PRESENT)\n"
+        } else {
+            out += "LaunchDaemon plist: \(plistURL.path) (NOT PRESENT — helper is running as SMAppService, not as a legacy LaunchDaemon)\n"
+        }
+
+        // XPC connection state
+        out += "XPC connection active: \(self.isActive())\n"
+
+        // Try to enumerate the SMC keys this machine exposes, so the
+        // maintainer can see whether the fan keys are present (Intel
+        // Mac Pro) or absent (some unsupported models).
+        if #available(macOS 13, *), self.state == .enabled {
+            let numStr = SMC.shared.getStringValue("FNum")
+            out += "SMC FNum: \(numStr ?? "(missing)")\n"
+            if let numStr, let n = Int(numStr) {
+                for i in 0..<n {
+                    let id = SMC.shared.getStringValue("F\(i)ID") ?? "?"
+                    let mode = SMC.shared.getStringValue("F\(i)Md") ?? "?"
+                    out += "  F\(i): id=\(id) mode=\(mode)\n"
+                }
+            }
+        } else {
+            out += "SMC: not readable while helper is not enabled\n"
+        }
+
+        return out
+    }
+
     public var isInstalled: Bool {
         if #available(macOS 13, *) {
             return self.state == .enabled

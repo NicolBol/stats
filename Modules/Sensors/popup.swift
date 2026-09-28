@@ -595,12 +595,32 @@ internal class FanView: NSStackView {
         button.wantsLayer = true
         button.layer?.backgroundColor = NSColor.clear.cgColor
         self.updateHelperButtonTitle(button)
+        // Right-click on the button shows a context menu with "Copy
+        // diagnostic" — the same payload that NSLogs already writes,
+        // so a user can paste it into a bug report without opening
+        // Console.app. This catches the "fan control silently does
+        // nothing" report that the previous commit only logged.
+        let menu = NSMenu()
+        let copy = NSMenuItem(title: localizedString("Copy fan helper diagnostic"),
+                              action: #selector(self.copyHelperDiagnostic),
+                              keyEquivalent: "")
+        copy.target = self
+        menu.addItem(copy)
+        button.menu = menu
         self.helperButton = button
 
         container.addArrangedSubview(button)
         view.addSubview(container)
 
         return view
+    }
+
+    @objc private func copyHelperDiagnostic() {
+        let p = NSPasteboard.general
+        p.clearContents()
+        p.setString(SMCHelper.shared.diagnostic(), forType: .string)
+        // Also log it so the unified log picks it up.
+        NSLog("SMCHelper diagnostic copied to clipboard:\n%@", SMCHelper.shared.diagnostic())
     }
 
     /// Reflects the current helperState on the helperView's button. Called
