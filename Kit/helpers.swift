@@ -1119,15 +1119,48 @@ public enum SMCHelperInstallState {
     case failed
 }
 
+/// The four launchd states the SMAppService-managed helper can be in on
+/// macOS 13+. Distinguishing `notInstalled` from `requiresApproval` is
+/// what makes the user-facing button useful: the latter needs the user
+/// to flip a toggle in System Settings ▸ Login Items, the former needs
+/// a re-registration. The two error paths require different actions.
+public enum SMCHelperState: Equatable {
+    /// No SMAppService registration; the helper has never been installed
+    /// or has been explicitly removed. Click "Install fan helper".
+    case notInstalled
+    /// Registered as a daemon but the user has not yet approved it in
+    /// System Settings ▸ General ▸ Login Items. Click "Approve in
+    /// System Settings".
+    case requiresApproval
+    /// The helper is registered and approved. Fan control works.
+    case enabled
+    /// Either the platform is pre-macOS 13 (legacy SMJobBless install) or
+    /// SMAppService returned a status we don't recognise. Don't block
+    /// the user, just don't show the helperView.
+    case unknown
+}
+
 public class SMCHelper {
     public static let shared = SMCHelper()
-    
+
     private let id: String = "eu.exelban.Stats.SMC.Helper"
     private let plistName: String = "eu.exelban.Stats.SMC.Helper.plist"
-    
+
+    public var state: SMCHelperState {
+        if #available(macOS 13, *) {
+            switch SMAppService.daemon(plistName: self.plistName).status {
+            case .enabled:           return .enabled
+            case .requiresApproval:  return .requiresApproval
+            case .notRegistered, .notFound: return .notInstalled
+            @unknown default:         return .unknown
+            }
+        }
+        return self.legacyIsInstalled ? .enabled : .notInstalled
+    }
+
     public var isInstalled: Bool {
         if #available(macOS 13, *) {
-            return SMAppService.daemon(plistName: self.plistName).status == .enabled
+            return self.state == .enabled
         }
         return self.legacyIsInstalled
     }

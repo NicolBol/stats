@@ -468,7 +468,7 @@ internal class FanView: NSStackView {
     }
     private var resetModeAfterSleep: Bool = false
     private var controlState: Bool
-    private var helperInstalled: Bool = false
+    private var helperState: SMCHelperState
     private var helperButton: NSButton? = nil
     private var approvalPollTimer: Timer? = nil
     private var fanValue: FanValue {
@@ -486,9 +486,10 @@ internal class FanView: NSStackView {
         self.fan = fan
         self.sizeCallback = callback
         self.controlState = Store.shared.bool(key: "Sensors_fanControl", defaultValue: true)
-        
+        self.helperState = SMCHelper.shared.state
+
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 0))
-        
+
         self.helperView = self.noHelper()
         self.controlView = self.control()
         self.buttonsView = self.mode()
@@ -572,7 +573,7 @@ internal class FanView: NSStackView {
     private func noHelper() -> NSView {
         let view: NSView = NSView(frame: NSRect(x: 0, y: 0, width: self.frame.width, height: 30))
         view.heightAnchor.constraint(equalToConstant: view.bounds.height).isActive = true
-        
+
         let container = NSStackView(frame: NSRect(x: 0, y: 4, width: view.frame.width, height: view.frame.height - 8))
         container.wantsLayer = true
         container.layer?.cornerRadius = Constants.Popup.radius
@@ -582,24 +583,47 @@ internal class FanView: NSStackView {
         container.spacing = 0
         container.wantsLayer = true
         container.layer?.backgroundColor = (isDarkMode ? NSColor(red: 17/255, green: 17/255, blue: 17/255, alpha: 0.25) : NSColor(red: 225/255, green: 225/255, blue: 225/255, alpha: 1)).cgColor
-        
+
+        // The button label and target depend on the SMCHelperState:
+        // - notInstalled: "Install fan helper" -> installHelper
+        // - requiresApproval: "Approve in System Settings ▸ Login Items" -> openLoginItems
+        // - enabled / unknown: noHelper() is not displayed by setupControls()
         let button: NSButton = NSButton()
         button.isBordered = false
         button.target = self
         button.isBordered = false
         button.wantsLayer = true
         button.layer?.backgroundColor = NSColor.clear.cgColor
-        button.attributedTitle = NSAttributedString(string: localizedString("Install fan helper"), attributes: [
-            .foregroundColor: NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold)
-        ])
-        button.action = #selector(self.installHelper)
+        self.updateHelperButtonTitle(button)
         self.helperButton = button
-        
+
         container.addArrangedSubview(button)
         view.addSubview(container)
-        
+
         return view
+    }
+
+    /// Reflects the current helperState on the helperView's button. Called
+    /// whenever helperState changes (init, after install, after
+    /// didBecomeActive) and from setupControls().
+    private func updateHelperButtonTitle(_ button: NSButton) {
+        switch self.helperState {
+        case .notInstalled:
+            button.attributedTitle = NSAttributedString(string: localizedString("Install fan helper"), attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold)
+            ])
+            button.action = #selector(self.installHelper)
+        case .requiresApproval:
+            button.attributedTitle = NSAttributedString(string: localizedString("Approve in System Settings ▸ Login Items"), attributes: [
+                .foregroundColor: NSColor.systemOrange,
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold)
+            ])
+            button.action = #selector(self.openLoginItems)
+        case .enabled, .unknown:
+            // setupControls() will hide the helperView entirely.
+            break
+        }
     }
     
     private func mode() -> NSView {
@@ -917,10 +941,18 @@ internal class FanView: NSStackView {
             DispatchQueue.main.async {
                 switch state {
                 case .enabled:
+                    self?.setupControls(.enabled)
                     NotificationCenter.default.post(name: .fanHelperState, object: nil, userInfo: ["state": true])
                 case .requiresApproval:
+                    // The helper is registered but the user has to flip
+                    // a toggle in System Settings ▸ Login Items. Show the
+                    // approval flow immediately, with a button that opens
+                    // System Settings instead of an inert "Install fan helper"
+                    // link.
+                    self?.setupControls(.requiresApproval)
                     self?.showApprovalPending()
                 case .failed:
+                    self?.setupControls(.notInstalled)
                     self?.showInstallFailed()
                     NotificationCenter.default.post(name: .fanHelperState, object: nil, userInfo: ["state": false])
                 }
@@ -933,17 +965,20 @@ internal class FanView: NSStackView {
     }
     
     private func showApprovalPending() {
-        self.helperButton?.title = localizedString("Approve in System Settings ▸ Login Items")
-        self.helperButton?.action = #selector(self.openLoginItems)
-        
+        // Reflect the approval state in the helper button without waiting
+        // for didBecomeActiveNotification to fire. setupControls() and
+        // updateHelperButtonTitle() handle the rest when state transitions
+        // to .enabled.
+        self.updateHelperButtonTitle(self.helperButton ?? NSButton())
+
         self.startApprovalPolling()
-        
+
         let alert = NSAlert()
         alert.messageText = localizedString("Fan helper needs your approval")
         alert.informativeText = localizedString("To control the fans, enable Stats in System Settings ▸ Login Items.")
         alert.addButton(withTitle: localizedString("Open Login Items"))
         alert.addButton(withTitle: localizedString("Cancel"))
-        
+
         if alert.runModal() == .alertFirstButtonReturn {
             SMCHelper.shared.openLoginItems()
         }
@@ -964,15 +999,27 @@ internal class FanView: NSStackView {
     private func startApprovalPolling() {
         self.approvalPollTimer?.invalidate()
         var elapsed: TimeInterval = 0
+        // Poll SMAppService until the helper reaches .enabled or the user
+        // gives up (60s). Re-entering SMAppService on every tick is cheap
+        // and avoids a race where the user dismisses the approval alert,
+        // approves the helper in System Settings, and never clicks our
+        // button again.
         self.approvalPollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
             elapsed += 2
-            if SMCHelper.shared.isInstalled {
+            let current = SMCHelper.shared.state
+            if current == .enabled {
                 timer.invalidate()
                 self?.approvalPollTimer = nil
                 DispatchQueue.main.async {
-                    self?.helperButton?.title = localizedString("Install fan helper")
-                    self?.helperButton?.action = #selector(FanView.installHelper)
-                    self?.setupControls(true)
+                    self?.setupControls(.enabled)
+                }
+            } else if current != .requiresApproval {
+                // Helper was uninstalled from System Settings while we were
+                // waiting; reset to the not-installed state.
+                timer.invalidate()
+                self?.approvalPollTimer = nil
+                DispatchQueue.main.async {
+                    self?.setupControls(.notInstalled)
                 }
             } else if elapsed >= 60 {
                 timer.invalidate()
@@ -981,16 +1028,23 @@ internal class FanView: NSStackView {
         }
     }
     
-    private func setupControls(_ isInstalled: Bool? = nil) {
-        let helperState = isInstalled ?? SMCHelper.shared.isInstalled
-        self.helperInstalled = helperState
-        
+    private func setupControls(_ overrideState: SMCHelperState? = nil) {
+        // Allow callers to force a specific state (used by the install
+        // completion handler so the UI updates immediately without waiting
+        // for didBecomeActiveNotification). Falls back to a fresh query
+        // against SMAppService.
+        let s = overrideState ?? SMCHelper.shared.state
+        if s != self.helperState {
+            self.helperState = s
+            self.helperButton.flatMap { self.updateHelperButtonTitle($0) }
+        }
+
         if !self.controlState {
             self.helperView?.removeFromSuperview()
             self.controlView?.removeFromSuperview()
             self.buttonsView?.removeFromSuperview()
         } else {
-            if helperState {
+            if s == .enabled {
                 self.helperView?.removeFromSuperview()
                 if self.fan.maxSpeed != self.fan.minSpeed, let v = self.buttonsView {
                     self.addArrangedSubview(v)
@@ -1006,20 +1060,28 @@ internal class FanView: NSStackView {
                 }
             }
         }
-        
+
         let h = self.arrangedSubviews.map({ $0.bounds.height }).reduce(0, +)
         self.setFrameSize(NSSize(width: self.frame.width, height: h + self.horizontalMargin))
         self.sizeCallback()
     }
     
     @objc private func changeHelperState(_ notification: Notification) {
-        guard let state = notification.userInfo?["state"] as? Bool else { return }
+        // The notification posts a Bool state in userInfo (true == .enabled).
+        // Translate it to SMCHelperState and pass it through so setupControls
+        // re-evaluates the UI without a second SMAppService query.
+        let state: SMCHelperState = (notification.userInfo?["state"] as? Bool ?? false) ? .enabled : .notInstalled
         self.setupControls(state)
     }
-    
+
     @objc private func recheckHelperState() {
-        guard SMCHelper.shared.isInstalled != self.helperInstalled else { return }
-        self.setupControls()
+        // Called from didBecomeActiveNotification; a fresh SMAppService
+        // query is cheap and the user just came back from System Settings
+        // where they may have approved the helper.
+        let current = SMCHelper.shared.state
+        if current != self.helperState {
+            self.setupControls(current)
+        }
     }
     
     @objc private func controlCallback(_ notification: Notification) {
