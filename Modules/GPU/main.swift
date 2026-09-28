@@ -166,9 +166,9 @@ public class GPU: Module {
     
     private func infoCallback(_ raw: GPUs?) {
         guard raw != nil && !raw!.list.isEmpty, let value = raw, self.enabled else { return }
-        
+
         self.settingsView.setList(value)
-        
+
         let activeGPUs = value.active()
         guard let activeGPU = activeGPUs.first(where: { $0.state }) ?? activeGPUs.first else {
             return
@@ -177,8 +177,12 @@ public class GPU: Module {
         guard let utilization = selectedGPU.utilization else {
             return
         }
-        
+
         self.popupView.loadCallback(selectedGPU)
+        // Hand the full list to the popup so multi-GPU systems (Mac Pro with a
+        // W6800X Duo, etc.) surface every GPU's load, temperature, fan speed
+        // and clocks instead of only the selected one.
+        self.popupView.allGPUsCallback(value.list)
         self.portalView.callback(selectedGPU)
         self.notificationsView.usageCallback(utilization)
         self.previewView.loadCallback(selectedGPU)

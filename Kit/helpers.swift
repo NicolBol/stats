@@ -1334,7 +1334,7 @@ public class SMCHelper {
         guard self.connection == nil else {
             return self.connection
         }
-        
+
         let connection = NSXPCConnection(machServiceName: "eu.exelban.Stats.SMC.Helper", options: .privileged)
         connection.exportedObject = self
         connection.remoteObjectInterface = NSXPCInterface(with: HelperProtocol.self)
@@ -1344,27 +1344,56 @@ public class SMCHelper {
                 self?.connection = nil
             }
         }
-        
+        // The interruption handler fires when launchd drops the XPC channel,
+        // which is the most common failure mode for the "fan control helper
+        // isn't working anymore" symptom: the helper has been uninstalled,
+        // the Login-Items approval has been revoked, or its launchd plist
+        // failed to load. NSLog so the user can find the cause with
+        // `Console.app` or `log show --predicate 'eventMessage CONTAINS "SMCHelper"'`
+        // instead of staring at silently-ignored fan-speed changes.
+        connection.interruptionHandler = {
+            NSLog("SMCHelper: XPC connection interrupted (helper uninstalled or Login-Items approval revoked?)")
+        }
+
         self.connection = connection
         self.connection?.resume()
-        
+
         return self.connection
     }
-    
+
     private func helper(_ completion: ((Bool) -> Void)?) -> HelperProtocol? {
+        // Self-diagnose before pinging the helper: if launchd has no record
+        // of the daemon, every setFanSpeed below would silently no-op. The
+        // UI button shows "Install fan helper" but a user who already clicked
+        // it once wants to know *why* it's still not working — log it.
+        if #available(macOS 13, *) {
+            switch SMAppService.daemon(plistName: self.plistName).status {
+            case .enabled:
+                break
+            case .requiresApproval:
+                NSLog("SMCHelper: helper is installed but not approved in System Settings ▸ General ▸ Login Items")
+            case .notRegistered:
+                NSLog("SMCHelper: helper is not installed (no SMAppService registration). Click Sensors → Fan → Install fan helper, or approve it in System Settings ▸ Login Items")
+            case .notFound:
+                NSLog("SMCHelper: helper SMAppService entry not found. /Library/PrivilegedHelperTools/eu.exelban.Stats.SMC.Helper is missing — install it from Sensors → Fan → Install fan helper.")
+            @unknown default:
+                NSLog("SMCHelper: unknown SMAppService status; helper may not be reachable.")
+            }
+        }
+
         guard let helper = self.helperConnection() else {
             completion?(false)
             return nil
         }
         guard let service = helper.remoteObjectProxyWithErrorHandler({ error in
-            print(error)
+            NSLog("SMCHelper: failed to reach helper over XPC: \(error.localizedDescription)")
         }) as? HelperProtocol else {
             completion?(false)
             return nil
         }
-        
+
         service.setSMCPath(Bundle.main.path(forResource: "smc", ofType: nil)!)
-        
+
         return service
     }
     
