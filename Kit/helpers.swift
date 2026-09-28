@@ -1249,30 +1249,63 @@ public class SMCHelper {
     private var connection: NSXPCConnection? = nil
     
     public func setFanSpeed(_ id: Int, speed: Int) {
+        // Intel Macs don't need the helper for fan control — Apple's
+        // SMC class writes the F<n>Tg key directly. The helper exists
+        // only for the codesign-identity check on Apple Silicon. Bypass
+        // it on x86_64 so users on a Mac Pro 7,1 / Intel iMac can drive
+        // the fans even when the SMAppService-managed helper fails to
+        // register (e.g. when the upstream app's LaunchDaemon plist
+        // isn't code-signed and macOS rejects it with error -67028).
+        #if arch(x86_64)
+        SMC.shared.setFanSpeed(id, speed: speed)
+        return
+        #else
         guard let helper = self.helper(nil) else { return }
         helper.setFanSpeed(id: id, value: speed) { result in
             if let result, !result.isEmpty {
                 NSLog("set fan speed: \(result)")
             }
         }
+        #endif
     }
-    
+
     public func setFanMode(_ id: Int, mode: Int) {
+        #if arch(x86_64)
+        SMC.shared.setFanMode(id, mode: FanMode(rawValue: mode) ?? .automatic)
+        return
+        #else
         guard let helper = self.helper(nil) else { return }
         helper.setFanMode(id: id, mode: mode) { result in
             if let result, !result.isEmpty {
                 NSLog("set fan mode: \(result)")
             }
         }
+        #endif
     }
-    
+
     public func resetFanControl() {
+        #if arch(x86_64)
+        // No Ftst lock to clear on Intel Macs; the SMC writes are
+        // authoritative immediately.
+        return
+        #else
         guard let helper = self.helper(nil) else { return }
         helper.resetFanControl { _ in }
+        #endif
     }
     
     public func isActive() -> Bool {
+        // On Intel, fan control is always "active" — SMC.setFanSpeed
+        // writes the F<n>Tg key directly from the app process. The
+        // SMAppService helper exists only to satisfy the codesign-
+        // identity check on Apple Silicon. Returning false here would
+        // grey out the fan sliders in the Sensors popup even though
+        // they're functional.
+        #if arch(x86_64)
+        return true
+        #else
         return self.connection != nil
+        #endif
     }
     
     public func checkForUpdate() {

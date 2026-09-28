@@ -1053,7 +1053,20 @@ internal class FanView: NSStackView {
         // completion handler so the UI updates immediately without waiting
         // for didBecomeActiveNotification). Falls back to a fresh query
         // against SMAppService.
-        let s = overrideState ?? SMCHelper.shared.state
+        // On Intel Macs, fan control works without the SMAppService
+        // helper (the SMC writes are direct from the app process), so
+        // we force .enabled here regardless of the SMAppService state.
+        // This stops the popup from showing the misleading
+        // "Approve in System Settings" button on Mac Pro 7,1 and
+        // similar Intel machines where launchd rejects the helper
+        // plist (error -67028).
+        let s: SMCHelperState = {
+            #if arch(x86_64)
+            return .enabled
+            #else
+            return overrideState ?? SMCHelper.shared.state
+            #endif
+        }()
         if s != self.helperState {
             self.helperState = s
             self.helperButton.flatMap { self.updateHelperButtonTitle($0) }
